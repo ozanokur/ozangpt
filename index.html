@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Chat Proxy</title>
+  <style>
+    html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji"; }
+    .wrap { display: grid; grid-template-rows: auto 1fr auto; height: 100%; }
+    header { padding: 12px 16px; border-bottom: 1px solid #eee; }
+    main { padding: 16px; overflow: auto; }
+    .bubble { max-width: 800px; padding: 10px 14px; border-radius: 12px; margin: 8px 0; white-space: pre-wrap; }
+    .user { background: #e7f0ff; align-self: flex-end; }
+    .bot { background: #f5f5f5; }
+    footer { display: grid; grid-template-columns: 1fr auto; gap: 8px; padding: 12px 16px; border-top: 1px solid #eee; }
+    textarea { resize: none; padding: 10px; border-radius: 10px; border: 1px solid #ddd; min-height: 64px; }
+    button { padding: 10px 16px; border-radius: 10px; border: 1px solid #ddd; background: #fff; cursor: pointer; }
+    .row { display: flex; gap: 8px; align-items: center; }
+    .small { font-size: 12px; color: #666; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <strong>Chat Proxy</strong>
+      <div class="small">Talking to your proxy → upstream model</div>
+    </header>
+
+    <main id="chat"></main>
+
+    <footer>
+      <textarea id="input" placeholder="Type a message…"></textarea>
+      <div class="row">
+        <button id="send">Send</button>
+        <label class="small"><input type="checkbox" id="stream" checked> Stream</label>
+      </div>
+      <div class="row" style="grid-column: 1 / -1;">
+        <input id="model" placeholder="Model (optional)" style="flex:1; padding:8px; border:1px solid #ddd; border-radius: 8px;" />
+        <input id="token" placeholder="Proxy token (if set)" style="flex:1; padding:8px; border:1px solid #ddd; border-radius: 8px;" />
+      </div>
+    </footer>
+  </div>
+
+  <script>
+    const chat = document.getElementById('chat');
+    const input = document.getElementById('input');
+    const sendBtn = document.getElementById('send');
+    const streamChk = document.getElementById('stream');
+    const modelInput = document.getElementById('model');
+    const tokenInput = document.getElementById('token');
+    const PROXY_URL = 'https://ozangpt.onrender.com/api/chat';
+
+    const messages = [];
+
+    function addBubble(text, cls) {
+      const div = document.createElement('div');
+      div.className = `bubble ${cls}`;
+      div.textContent = text;
+      chat.appendChild(div);
+      chat.scrollTop = chat.scrollHeight;
+      return div;
+    }
+
+    async function send() {
+      const content = input.value.trim();
+      if (!content) return;
+      input.value = '';
+
+      messages.push({ role: 'user', content });
+      addBubble(content, 'user');
+
+      const headers = { 'Content-Type': 'application/json' };
+      if (tokenInput.value) headers['Authorization'] = `Bearer ${tokenInput.value}`;
+
+      if (streamChk.checked) {
+        const resp = await fetch(PROXY_URL + '/api/stream', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ messages, model: modelInput.value || undefined })
+        });
+
+        if (!resp.ok) {
+          const t = await resp.text();
+          addBubble(`Error: ${t}`, 'bot');
+          return;
+        }
+
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+        let botDiv = addBubble('', 'bot');
+        let acc = '';
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          const chunk = decoder.decode(value, { stream: true });
+          acc += chunk;
+
+          // SSE: lines starting with "data: " contain JSON chunks
+          const parts = acc.split('\n\n');
+          acc = parts.pop();
+          for (const p of parts) {
+            const line = p.split('\n').find(l => l.startsWith('data: '));
+            if (!line) continue;
+            const data = line.slice(6);
+            if (data === "[DONE]") continue;
+            try {
+              const obj = JSON.parse(data);
+              const token = obj.choices?.[0]?.delta?.content || '';
+              if (token) botDiv.textContent += token;
+            } catch (e) {}
+          }
+        }
+
+        messages.push({ role: 'assistant', content: botDiv.textContent });
+      } else {
+        const resp = await fetch(PROXY_URL + '/api/chat', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ messages, model: modelInput.value || undefined })
+        });
+        const json = await resp.json();
+        const text = json.choices?.[0]?.message?.content || JSON.stringify(json);
+        messages.push({ role: 'assistant', content: text });
+        addBubble(text, 'bot');
+      }
+    }
+
+    sendBtn.addEventListener('click', send);
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        send();
+      }
+    });
+  </script>
+</body>
+</html>
